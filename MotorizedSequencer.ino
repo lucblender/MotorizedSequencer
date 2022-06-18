@@ -1,6 +1,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <EEPROM.h>
 #include <Wire.h>
+#include "AnalogMux.h"
 
 #include "grove_alphanumeric_display.h"
 #include <MX1508.h>
@@ -18,7 +19,6 @@
 
 //SPEED BPM LED
 #define BPM_LED 10
-
 // Buttons
 #define BTN0 40
 #define BTN1 33
@@ -67,15 +67,16 @@ int bpmLastValue = 0;
 
 //CVs gate
 #define GATE 22
-#define CV0 24
-#define CV1 25
-#define CV2 26
-#define CV3 27
-#define CV4 28
-#define CV5 29
-#define CV6 17
-#define CV7 31
-int CVs[SEQUENCE_LEN] = {CV0, CV1, CV2, CV3, CV4, CV5, CV6, CV7};
+#define GATE_RELEASE_TIME 10
+
+bool gateReleased = false;
+
+#define S0_CV 25
+#define S1_CV 26
+#define S2_CV 27
+#define EN_CV 24
+
+AnalogMux cvMux(S0_CV, S1_CV, S2_CV, EN_CV);
 
 //MOTORS DEFINITION
 #define MOT0_PINA 2
@@ -171,6 +172,15 @@ uint32_t  gateColor = pixels.Color(15, 150, 0);
 uint32_t  activeStepColor = pixels.Color(0, 150, 5);
 uint32_t  offColor = pixels.Color(0, 0, 0);
 
+// Sync linked in variables
+#define LOWEST_SYNC_BPM 30
+static unsigned long lastSync = 0;
+static unsigned long delaySinceLastSync = 0;
+float estimatedSyncPeriod = 0;
+float maxSyncPeriod = 1000.0 / (LOWEST_SYNC_BPM / 60.0);
+bool syncConnected = false;
+bool lastSyncConnected = false;
+
 bool reached = false;
 int setpoint = random(0, 1024);
 
@@ -181,9 +191,12 @@ void setup() {
   for (int i = 0; i < SEQUENCE_LEN; i++)
   {
     pinMode(BTNs[i], INPUT_PULLUP);
-    pinMode(CVs[i], OUTPUT);
-    digitalWrite(CVs[i], LOW);
   }
+
+  pinMode(SYNC_IN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(SYNC_IN), syncInInterrupt, RISING);
+  
+  cvMux.selectMuxPin(255);
 
   pinMode(LOAD_BTN, INPUT_PULLUP);
   pinMode(SAVE_BTN, INPUT_PULLUP);
@@ -193,7 +206,9 @@ void setup() {
 
   pinMode(SYNC_IN, INPUT_PULLUP);
   pinMode(SYNC_OUT, OUTPUT);
+  digitalWrite(SYNC_OUT, LOW);
   pinMode(GATE, OUTPUT);
+  digitalWrite(GATE, LOW);
 
 
 
@@ -242,11 +257,76 @@ void loop() {
   scanBtns();
   getPlayStop();
 
+  //sync in logic start
+  if(millis() - lastSync > maxSyncPeriod)
+  {    
+    syncConnected = false;
+  }
+  else
+  {
+    syncConnected = true;
+  }
+
+  if(lastSyncConnected != syncConnected)
+  {
+    if(syncConnected)
+    {      
+      tube.clearBuf();
+      tube.setTubeSingleChar(FIRST_TUBE, 'S');
+      tube.setTubeSingleChar(SECOND_TUBE, 'I');
+      tube.display();
+    }
+    else
+    {
+      //Put bpm to 0 to force re-displaying bpm
+      bpmLastValue = 0;
+    }
+  }
+  
+  lastSyncConnected = syncConnected;
+  //sync in logic end
+
+  if(syncConnected==true && (millis()-lastSync) > (delaySinceLastSync-GATE_RELEASE_TIME) && gateReleased == false)
+  {
+    gateRelease();
+  }
+  if (syncConnected==false &&((millis() - lastLoop) > (delayPeriod-GATE_RELEASE_TIME)) && gateReleased == false)
+  {
+    gateRelease();
+  }
+
   if (millis() - lastLoop > delayPeriod) {
-    sendCvOut();
-    blinkSpeed();
+    if(syncConnected == false)
+    {       
+      doSequenceStep();
+    }
     lastLoop = millis();
   }
+}
+
+void syncInInterrupt()
+{
+  delaySinceLastSync =  millis()-lastSync;
+  doSequenceStep();
+  lastSync = millis();
+}
+
+void gateSet()
+{
+  digitalWrite(GATE, HIGH);
+  gateReleased = false;
+}
+
+void gateRelease()
+{
+  digitalWrite(GATE, LOW);
+  gateReleased = true;
+}
+void doSequenceStep()
+{  
+  sendCvOut();
+  sendSyncOut();
+  blinkSpeed();
 }
 
 void updateMode()
@@ -262,6 +342,12 @@ void updateMode()
     pixels.setPixelColor(ACTIVESTEPMODE_LED, activeStepColor);
   }
   pixels.show();
+}
+
+void sendSyncOut()
+{
+  digitalWrite(SYNC_OUT, HIGH);
+  digitalWrite(SYNC_OUT, LOW);
 }
 
 void blinkSpeed()
@@ -303,25 +389,36 @@ void getBpm() {
   if (abs(bpmLastValue - bpmValue) > 1 )
   {
     delayPeriod = 1000.0 / (bpmValue / 60.0);
-    int hundred = bpmValue / 100;
-    int ten = (bpmValue / 10) % 10;
-    int unit = bpmValue % 10;
-    tube.clearBuf();
-    tube.setTubeSingleNum(FIRST_TUBE, ten);
-    tube.setTubeSingleNum(SECOND_TUBE, unit);
-    if (hundred == 0)
+    if(syncConnected == false)
     {
-      tube.setPoint(false, false);
+      int hundred = bpmValue / 100;
+      int ten = (bpmValue / 10) % 10;
+      int unit = bpmValue % 10;
+      tube.clearBuf();
+      tube.setTubeSingleNum(FIRST_TUBE, ten);
+      tube.setTubeSingleNum(SECOND_TUBE, unit);
+      if (hundred == 0)
+      {
+        tube.setPoint(false, false);
+      }
+      else if (hundred == 1)
+      {
+        tube.setPoint(false, true);
+      }
+      else if (hundred == 2)
+      {
+        tube.setPoint(true, true);
+      }
+      tube.display();
     }
-    else if (hundred == 1)
+    else
     {
-      tube.setPoint(false, true);
+      //Show we in sync in
+      tube.clearBuf();
+      tube.setTubeSingleChar(FIRST_TUBE, 'S');
+      tube.setTubeSingleChar(SECOND_TUBE, 'I');
+      tube.display();
     }
-    else if (hundred == 2)
-    {
-      tube.setPoint(true, true);
-    }
-    tube.display();
 
     bpmLastValue = bpmValue;
   }
@@ -360,19 +457,22 @@ void sendCvOut()
     int jump = 0;
     stepIndex  = (stepIndex + 1) % SEQUENCE_LEN;
 
-    while (gateState[stepIndex] == 0 && jump < SEQUENCE_LEN)
+    while (activeStepState[stepIndex] == 0 && jump < SEQUENCE_LEN)
     {
       stepIndex  = (stepIndex + 1) % SEQUENCE_LEN;
       jump += 1;
     }
 
-    for (int i = 0; i < SEQUENCE_LEN; i++)
-    {
-      digitalWrite(CVs[i], LOW);
+    if (gateState[stepIndex] == 1 && jump < SEQUENCE_LEN)
+    {      
+      cvMux.selectMuxPin(stepIndex);
+      gateSet();
     }
-    if (activeStepState[stepIndex] == 1 && jump < SEQUENCE_LEN)
-    {
-      digitalWrite(CVs[stepIndex], HIGH);
+    else
+    {      
+      Serial.println("ICI");
+      cvMux.selectMuxPin(255);
+      gateRelease();
     }
   }
 }
@@ -415,11 +515,9 @@ void getPlayStop()
     playStop = ! playStop;
     if (playStop == 0)
     {
+      
+      cvMux.selectMuxPin(255);
       digitalWrite(PLAY_LED, LOW);
-      for (int i = 0; i < SEQUENCE_LEN; i++)
-      {
-        digitalWrite(CVs[i], LOW);
-      }
     }
     else
     {
