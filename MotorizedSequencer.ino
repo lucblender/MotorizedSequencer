@@ -9,6 +9,19 @@
 // MAIN DEFINITION
 #define SEQUENCE_LEN 8
 
+// EEPROM DEFINITION
+#define PROGRAM_NUMBER 8
+unsigned long arrayValue[PROGRAM_NUMBER][SEQUENCE_LEN] = {
+  {500, 500, 500, 500, 500, 500, 500, 500},
+  {500, 500, 500, 500, 500, 500, 500, 500},
+  {500, 500, 500, 500, 500, 500, 500, 500},
+  {500, 500, 500, 500, 500, 500, 500, 500},
+  {500, 500, 500, 500, 500, 500, 500, 500},
+  {500, 500, 500, 500, 500, 500, 500, 500},
+  {500, 500, 500, 500, 500, 500, 500, 500},
+  {500, 500, 500, 500, 500, 500, 500, 500},
+};
+
 // LEDS
 #define NEOPIXEL_PIN 16
 #define NUMPIXELS 11
@@ -114,6 +127,8 @@ MX1508 motor7(MOT7_PINA, MOT7_PINB, FAST_DECAY, 1); //only motor with 1 pwm
 
 MX1508 motors[SEQUENCE_LEN] = {motor0, motor1, motor2, motor3, motor4, motor5, motor6, motor7};
 
+bool motorReachStart = false;
+int motorProgramValue = 0;
 
 //POT ANALOGIN DEFINITION
 #define POT0_IN A0
@@ -125,9 +140,10 @@ MX1508 motors[SEQUENCE_LEN] = {motor0, motor1, motor2, motor3, motor4, motor5, m
 #define POT6_IN A6
 #define POT7_IN A7
 int POT_INs [SEQUENCE_LEN] = {POT0_IN, POT1_IN, POT2_IN, POT3_IN, POT4_IN, POT5_IN, POT6_IN, POT7_IN};
+int analogValues [SEQUENCE_LEN] = {0, 0, 0, 0, 0, 0, 0, 0};
 
 #define PWM 255
-#define PWM_LOW 200
+#define PWM_LOW 65
 
 // 12 segments
 Seeed_Digital_Tube tube;
@@ -188,6 +204,23 @@ void setup() {
   Serial.begin(9600);
   Serial.println(delayPeriod);
 
+  for (int i = 0; i < PROGRAM_NUMBER; i++) {
+    // uncomment only one time to setup
+    //saveValue(i);
+    loadValue(i);
+  }
+
+  for (int i = 0; i < PROGRAM_NUMBER; i++) {
+    Serial.print("Program ");
+    Serial.print(i);
+    Serial.print(" : ");
+    for (int seq = 0; seq < SEQUENCE_LEN; seq++) {
+      Serial.print(arrayValue[i][seq]);
+      Serial.print(" ");
+    }
+    Serial.println("");
+  }
+
   for (int i = 0; i < SEQUENCE_LEN; i++)
   {
     pinMode(BTNs[i], INPUT_PULLUP);
@@ -195,7 +228,7 @@ void setup() {
 
   pinMode(SYNC_IN, INPUT);
   attachInterrupt(digitalPinToInterrupt(SYNC_IN), syncInInterrupt, RISING);
-  
+
   cvMux.selectMuxPin(255);
 
   pinMode(LOAD_BTN, INPUT_PULLUP);
@@ -256,10 +289,25 @@ void loop() {
   getModeBtn();
   scanBtns();
   getPlayStop();
+  getLoadSaveBtn();
+
+  if(motorReachStart == true)
+  {
+    bool reached = true;
+    for (int i = 0; i < SEQUENCE_LEN; i++)
+    {
+      //reachSetpointSpeedRegulation(MX1508 motor, int AN_PIN, int setpoint)
+      reached &= reachSetpointSpeedRegulation(motors[i],POT_INs[i],(int)arrayValue[motorProgramValue][i]);
+    }
+    if(reached == true)
+    {
+      motorReachStart = false;
+    }
+  }
 
   //sync in logic start
-  if(millis() - lastSync > maxSyncPeriod)
-  {    
+  if (millis() - lastSync > maxSyncPeriod)
+  {
     syncConnected = false;
   }
   else
@@ -267,10 +315,10 @@ void loop() {
     syncConnected = true;
   }
 
-  if(lastSyncConnected != syncConnected)
+  if (lastSyncConnected != syncConnected)
   {
-    if(syncConnected)
-    {      
+    if (syncConnected)
+    {
       tube.clearBuf();
       tube.setTubeSingleChar(FIRST_TUBE, 'S');
       tube.setTubeSingleChar(SECOND_TUBE, 'I');
@@ -282,22 +330,22 @@ void loop() {
       bpmLastValue = 0;
     }
   }
-  
+
   lastSyncConnected = syncConnected;
   //sync in logic end
 
-  if(syncConnected==true && (millis()-lastSync) > (delaySinceLastSync-GATE_RELEASE_TIME) && gateReleased == false)
+  if (syncConnected == true && (millis() - lastSync) > (delaySinceLastSync - GATE_RELEASE_TIME) && gateReleased == false)
   {
     gateRelease();
   }
-  if (syncConnected==false &&((millis() - lastLoop) > (delayPeriod-GATE_RELEASE_TIME)) && gateReleased == false)
+  if (syncConnected == false && ((millis() - lastLoop) > (delayPeriod - GATE_RELEASE_TIME)) && gateReleased == false)
   {
     gateRelease();
   }
 
   if (millis() - lastLoop > delayPeriod) {
-    if(syncConnected == false)
-    {       
+    if (syncConnected == false)
+    {
       doSequenceStep();
     }
     lastLoop = millis();
@@ -306,7 +354,7 @@ void loop() {
 
 void syncInInterrupt()
 {
-  delaySinceLastSync =  millis()-lastSync;
+  delaySinceLastSync =  millis() - lastSync;
   doSequenceStep();
   lastSync = millis();
 }
@@ -322,8 +370,51 @@ void gateRelease()
   digitalWrite(GATE, LOW);
   gateReleased = true;
 }
+
+
+void getLoadSaveBtn()
+{
+
+  loadBtnState = !digitalRead(LOAD_BTN);
+  saveBtnState = !digitalRead(SAVE_BTN);
+
+  if (loadBtnState != loadBtnLastState && loadBtnState == 1)
+  {
+    Serial.println("Load pressed");
+    loadValue(programValue);
+    motorReachStart = true;
+    motorProgramValue = programValue;
+
+    tube.displayString("ld", 0);
+  }
+
+  if (saveBtnState != saveBtnLastState && saveBtnState == 1 && motorReachStart == false)
+  {
+
+    Serial.println("Save pressed");
+    //force re-read of program to display it
+    oldProgramValue = 0;
+    selectRead();
+    updateAnalogArray();
+    saveValue(programValue);
+
+    tube.displayString("SV", 0);
+
+  }
+
+  loadBtnLastState = loadBtnState;
+  saveBtnLastState = saveBtnState;
+}
+
+void updateAnalogArray()
+{
+  for (int i = 0; i < SEQUENCE_LEN; i++)
+  {
+    analogValues[i] = analogRead(POT_INs[i]);
+  }
+}
 void doSequenceStep()
-{  
+{
   sendCvOut();
   sendSyncOut();
   blinkSpeed();
@@ -363,7 +454,12 @@ bool reachSetpointSpeedRegulation(MX1508 motor, int AN_PIN, int setpoint)
 {
   int speed = PWM;
   int pot = analogRead(AN_PIN);
-  if (abs(pot - setpoint) > 5) {
+  if (abs(pot - setpoint) > 100) {
+    
+    Serial.print("Not reached");
+    Serial.print(AN_PIN);
+    Serial.print(" ");
+    Serial.println(abs(pot - setpoint));
     if (abs(pot - setpoint) < 200) {
       speed = PWM_LOW;
     }
@@ -378,6 +474,8 @@ bool reachSetpointSpeedRegulation(MX1508 motor, int AN_PIN, int setpoint)
   }
   else
   {
+    Serial.print("Stop motor :");
+    Serial.println(AN_PIN);
     motor.stopMotor();
     return true;
   }
@@ -389,7 +487,7 @@ void getBpm() {
   if (abs(bpmLastValue - bpmValue) > 1 )
   {
     delayPeriod = 1000.0 / (bpmValue / 60.0);
-    if(syncConnected == false)
+    if (syncConnected == false)
     {
       int hundred = bpmValue / 100;
       int ten = (bpmValue / 10) % 10;
@@ -433,8 +531,6 @@ void selectRead() {
     tube.setTubeSingleChar(FIRST_TUBE, 'P');
     tube.setTubeSingleNum(SECOND_TUBE, programValue);
     tube.display();
-    //showProgram = true;
-    //showProgramCounter = 0;
   }
   oldProgramValue = programValue;
 }
@@ -464,13 +560,12 @@ void sendCvOut()
     }
 
     if (gateState[stepIndex] == 1 && jump < SEQUENCE_LEN)
-    {      
+    {
       cvMux.selectMuxPin(stepIndex);
       gateSet();
     }
     else
-    {      
-      Serial.println("ICI");
+    {
       cvMux.selectMuxPin(255);
       gateRelease();
     }
@@ -515,7 +610,7 @@ void getPlayStop()
     playStop = ! playStop;
     if (playStop == 0)
     {
-      
+
       cvMux.selectMuxPin(255);
       digitalWrite(PLAY_LED, LOW);
     }
@@ -560,4 +655,27 @@ void displayTube() {
   // Display the current frame of tube 2's animation.
   tube.setTubeSegments(FIRST_TUBE, tubeFrames[currentSegment]);
   tube.setTubeSegments(SECOND_TUBE, tubeFrames[currentSegment]);
+}
+
+void saveValue(int program) {
+
+  for (int i = 0; i < SEQUENCE_LEN; i++)
+  {
+    arrayValue[program][i] = analogValues[i];
+  }
+  for (int i = 0; i < SEQUENCE_LEN; i++) {
+
+    unsigned long lsb = arrayValue[program][i] & 0xFF;
+    unsigned long msb = (arrayValue[program][i] >> 8) & 0xFF;
+    EEPROM.write(program * (SEQUENCE_LEN * 2) + (i * 2), msb);
+    EEPROM.write(program * (SEQUENCE_LEN * 2) + (i * 2) + 1, lsb);
+  }
+}
+
+void loadValue(int program) {
+  for (int i = 0; i < SEQUENCE_LEN; i++) {
+    unsigned long msb = EEPROM.read(program * (SEQUENCE_LEN * 2) + (i * 2));
+    unsigned long lsb = EEPROM.read(program * (SEQUENCE_LEN * 2) + (i * 2) + 1);
+    arrayValue[program][i] = (msb << 8) + lsb;
+  }
 }
