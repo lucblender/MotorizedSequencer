@@ -80,7 +80,7 @@ int bpmLastValue = 0;
 
 //CVs gate
 #define GATE 22
-#define GATE_RELEASE_TIME 10
+#define GATE_RELEASE_TIME 200
 
 bool gateReleased = false;
 
@@ -126,6 +126,7 @@ MX1508 motor6(MOT6_PINA, MOT6_PINB, FAST_DECAY, 2);
 MX1508 motor7(MOT7_PINA, MOT7_PINB, FAST_DECAY, 1); //only motor with 1 pwm
 
 MX1508 motors[SEQUENCE_LEN] = {motor0, motor1, motor2, motor3, motor4, motor5, motor6, motor7};
+bool motorsReached[SEQUENCE_LEN] = {false, false, false, false, false, false, false, false};
 
 bool motorReachStart = false;
 int motorProgramValue = 0;
@@ -142,8 +143,13 @@ int motorProgramValue = 0;
 int POT_INs [SEQUENCE_LEN] = {POT0_IN, POT1_IN, POT2_IN, POT3_IN, POT4_IN, POT5_IN, POT6_IN, POT7_IN};
 int analogValues [SEQUENCE_LEN] = {0, 0, 0, 0, 0, 0, 0, 0};
 
+#define DELTA_ANALOG_VALUE 30
+
 #define PWM 255
+#define PWM_MEDIUM 100
+#define PWM_MEDIUM_7 150
 #define PWM_LOW 65
+#define PWM_LOW_7 120
 
 // 12 segments
 Seeed_Digital_Tube tube;
@@ -200,6 +206,16 @@ bool lastSyncConnected = false;
 bool reached = false;
 int setpoint = random(0, 1024);
 
+
+//TODO 
+#define PROGRAM_CIRCULAR_BUFFER_LEN 32
+int programValueBuffer [PROGRAM_CIRCULAR_BUFFER_LEN]= {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+int indexProgramValueBuffer = 0;
+
+int sensorValue = 0;    //initialization of sensor variable, equivalent to EMA Y
+float EMA_a = 0.1;      //initialization of EMA alpha
+int EMA_S = 0;   
+
 void setup() {
   Serial.begin(9600);
   Serial.println(delayPeriod);
@@ -241,9 +257,7 @@ void setup() {
   pinMode(SYNC_OUT, OUTPUT);
   digitalWrite(SYNC_OUT, LOW);
   pinMode(GATE, OUTPUT);
-  digitalWrite(GATE, LOW);
-
-
+  digitalWrite(GATE, HIGH);
 
   Wire.begin();
   // If using four digital tubes, use this configuration.
@@ -277,32 +291,32 @@ void setup() {
 
 void loop() {
 
-  if (reached == true)
-  {
-    reached = false;
-    setpoint = random(0, 1024);
-    Serial.print("A: ");
-    Serial.println(setpoint);
-  }
-  selectRead();
-  getBpm();
-  getModeBtn();
-  scanBtns();
-  getPlayStop();
-  getLoadSaveBtn();
 
-  if(motorReachStart == true)
+
+  if (motorReachStart == true)
   {
     bool reached = true;
     for (int i = 0; i < SEQUENCE_LEN; i++)
     {
-      //reachSetpointSpeedRegulation(MX1508 motor, int AN_PIN, int setpoint)
-      reached &= reachSetpointSpeedRegulation(motors[i],POT_INs[i],(int)arrayValue[motorProgramValue][i]);
+      if (motorsReached[i] == false) {
+        //reachSetpointSpeedRegulation(MX1508 motor, int AN_PIN, int setpoint)
+        motorsReached[i] = reachSetpointSpeedRegulation(motors[i], POT_INs[i], (int)arrayValue[motorProgramValue][i]);
+        reached &= motorsReached[i];
+      }
     }
-    if(reached == true)
+    if (reached == true)
     {
       motorReachStart = false;
     }
+  }
+  else
+  {
+    selectRead();
+    getBpm();
+    getModeBtn();
+    scanBtns();
+    getPlayStop();
+    getLoadSaveBtn();
   }
 
   //sync in logic start
@@ -361,13 +375,13 @@ void syncInInterrupt()
 
 void gateSet()
 {
-  digitalWrite(GATE, HIGH);
+  digitalWrite(GATE, LOW);
   gateReleased = false;
 }
 
 void gateRelease()
 {
-  digitalWrite(GATE, LOW);
+  digitalWrite(GATE, HIGH);
   gateReleased = true;
 }
 
@@ -380,11 +394,14 @@ void getLoadSaveBtn()
 
   if (loadBtnState != loadBtnLastState && loadBtnState == 1)
   {
-    Serial.println("Load pressed");
     loadValue(programValue);
     motorReachStart = true;
     motorProgramValue = programValue;
 
+    for (int i = 0; i < SEQUENCE_LEN; i++)
+    {
+      motorsReached[i] = false;
+    }
     tube.displayString("ld", 0);
   }
 
@@ -437,8 +454,7 @@ void updateMode()
 
 void sendSyncOut()
 {
-  digitalWrite(SYNC_OUT, HIGH);
-  digitalWrite(SYNC_OUT, LOW);
+  digitalWrite(SYNC_OUT, !digitalRead(SYNC_OUT));
 }
 
 void blinkSpeed()
@@ -454,14 +470,12 @@ bool reachSetpointSpeedRegulation(MX1508 motor, int AN_PIN, int setpoint)
 {
   int speed = PWM;
   int pot = analogRead(AN_PIN);
-  if (abs(pot - setpoint) > 100) {
-    
-    Serial.print("Not reached");
-    Serial.print(AN_PIN);
-    Serial.print(" ");
-    Serial.println(abs(pot - setpoint));
-    if (abs(pot - setpoint) < 200) {
-      speed = PWM_LOW;
+  if (abs(pot - setpoint) > 20) {
+    if (abs(pot - setpoint) < 100) {
+      AN_PIN != POT7_IN ? speed = PWM_LOW : speed = PWM_LOW_7;
+    }
+    else if (abs(pot - setpoint) < 200) {
+      AN_PIN != POT7_IN ? speed = PWM_MEDIUM : speed = PWM_MEDIUM_7;
     }
     else {
       speed = PWM;
@@ -474,17 +488,17 @@ bool reachSetpointSpeedRegulation(MX1508 motor, int AN_PIN, int setpoint)
   }
   else
   {
-    Serial.print("Stop motor :");
-    Serial.println(AN_PIN);
     motor.stopMotor();
     return true;
   }
 }
 
 void getBpm() {
-  float tmpBpmValue = (analogRead(BPM_POT) / 1024.0 * BPM_RANGE) + BPM_MIN;
-  bpmValue = int(tmpBpmValue);
-  if (abs(bpmLastValue - bpmValue) > 1 )
+  EMA_S = (EMA_a*analogRead(BPM_POT)) + ((1-EMA_a)*EMA_S);
+  float tmpBpmValue = (EMA_S / 1024.0 * BPM_RANGE) + BPM_MIN;
+  bpmValue = int(tmpBpmValue);;
+
+  if (abs(bpmLastValue - bpmValue) > 2 )
   {
     delayPeriod = 1000.0 / (bpmValue / 60.0);
     if (syncConnected == false)
@@ -523,7 +537,15 @@ void getBpm() {
 }
 
 void selectRead() {
-  programValue = analogRead(SELECT_POT) / 128;
+  //TODO
+  programValueBuffer[indexProgramValueBuffer] = analogRead(SELECT_POT) / 128;
+  indexProgramValueBuffer = (indexProgramValueBuffer+1) %PROGRAM_CIRCULAR_BUFFER_LEN;
+  programValue = 0;
+  for(int i = 0; i<PROGRAM_CIRCULAR_BUFFER_LEN; i++)
+  {
+    programValue += programValueBuffer[i];
+  }
+  programValue = programValue>>5;
 
   if (programValue != oldProgramValue)
   {
